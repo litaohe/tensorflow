@@ -69,9 +69,7 @@ class LocalRendezvousTest : public ::testing::Test {
     rendez_ = NewLocalRendezvous();
   }
 
-  ~LocalRendezvousTest() override {
-    rendez_->Unref();
-  }
+  ~LocalRendezvousTest() override { rendez_->Unref(); }
 
   void SchedClosure(std::function<void()> fn) {
     threads_.Schedule(std::move(fn));
@@ -99,8 +97,8 @@ string V(const Tensor& tensor) {
 
 Rendezvous::ParsedKey MakeKey(const string& name) {
   string s = Rendezvous::CreateKey("/job:mnist/replica:1/task:2/CPU:0", 7890,
-                                   "/job:mnist/replica:1/task:2/device:GPU:0", name,
-                                   FrameAndIter(0, 0));
+                                   "/job:mnist/replica:1/task:2/device:GPU:0",
+                                   name, FrameAndIter(0, 0));
   Rendezvous::ParsedKey k;
   TF_EXPECT_OK(Rendezvous::ParseKey(s, &k));
   return k;
@@ -279,6 +277,12 @@ class DummyDeviceContext : public DeviceContext {
   explicit DummyDeviceContext(int stream_id) : stream_id_(stream_id) {}
   ~DummyDeviceContext() override {}
   int stream_id() const { return stream_id_; }
+
+  void CopyTensorInSameDevice(const Tensor* input_tensor, Device* device,
+                              Tensor* output_tensor,
+                              StatusCallback done) const override {
+    done(Status::OK());
+  }
 
  private:
   const int stream_id_;

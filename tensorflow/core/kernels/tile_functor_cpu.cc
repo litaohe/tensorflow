@@ -15,10 +15,10 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#include "tensorflow/core/kernels/tile_functor.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/kernels/ops_util.h"
+#include "tensorflow/core/kernels/tile_functor.h"
 
 namespace tensorflow {
 
@@ -57,6 +57,7 @@ typedef Eigen::ThreadPoolDevice CPUDevice;
 
 TF_CALL_bool(DEFINE_TYPE);
 TF_CALL_float(DEFINE_TYPE);
+TF_CALL_bfloat16(DEFINE_TYPE);
 TF_CALL_double(DEFINE_TYPE);
 TF_CALL_uint8(DEFINE_TYPE);
 TF_CALL_int32(DEFINE_TYPE);
@@ -78,6 +79,7 @@ typedef Eigen::SyclDevice SYCLDevice;
 
 TF_CALL_bool(DEFINE_TYPE);
 TF_CALL_float(DEFINE_TYPE);
+TF_CALL_bfloat16(DEFINE_TYPE);
 TF_CALL_double(DEFINE_TYPE);
 TF_CALL_uint8(DEFINE_TYPE);
 TF_CALL_int32(DEFINE_TYPE);

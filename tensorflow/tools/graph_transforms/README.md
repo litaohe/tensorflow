@@ -388,7 +388,7 @@ input is collapsed down into a simple constant.
 Args:
 
 *   clear_output_shapes: Clears tensor shape information saved as attributes.
-    Some older graphs containes out-of-date information and may cause import
+    Some older graphs contains out-of-date information and may cause import
     errors. Defaults to true.
 
 Prerequisites: None
@@ -638,6 +638,13 @@ loading a graph on a different system than the model was trained on, since some
 specified devices may not be available. In order to work with graphs like these,
 you can run this transform to wipe the slate clean and delete the device
 specifier from all ops.
+
+### remove_control_dependencies
+
+Args: None \
+Prerequisites: None
+
+Removes all control dependencies from the graph.
 
 ### remove_nodes
 
@@ -1079,7 +1086,7 @@ in the future.
 
 The Graph Transform Tool associates names of transforms with the code to
 implement them using the `REGISTER_GRAPH_TRANSFORM()` macro. This takes a string
-and a function, and automagically registers the transform with the tool. You
+and a function, and automatically registers the transform with the tool. You
 will need to watch out for a few things though:
 
 *   Because it's using global C++ objects in each file under the hood, the

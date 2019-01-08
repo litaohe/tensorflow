@@ -28,7 +28,7 @@ wasserstein_gradient_penalty
 All losses must be able to accept 1D or 2D Tensors, so as to be compatible with
 patchGAN style losses (https://arxiv.org/abs/1611.07004).
 
-To make these losses usable in the TFGAN framework, please create a tuple
+To make these losses usable in the TF-GAN framework, please create a tuple
 version of the losses with `losses_utils.py`.
 """
 
@@ -36,9 +36,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import numpy as np
 
 from tensorflow.contrib.framework.python.ops import variables as contrib_variables_lib
+from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
@@ -47,7 +47,6 @@ from tensorflow.python.ops import gradients_impl
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import random_ops
 from tensorflow.python.ops import variable_scope
-from tensorflow.python.ops.distributions import distribution as ds
 from tensorflow.python.ops.losses import losses
 from tensorflow.python.ops.losses import util
 from tensorflow.python.summary import summary
@@ -67,7 +66,12 @@ __all__ = [
     'wasserstein_gradient_penalty',
     'mutual_information_penalty',
     'combine_adversarial_loss',
+    'cycle_consistency_loss',
 ]
+
+
+def _to_float(tensor):
+  return math_ops.cast(tensor, dtypes.float32)
 
 
 # Wasserstein losses from `Wasserstein GAN` (https://arxiv.org/abs/1701.07875).
@@ -99,7 +103,7 @@ def wasserstein_generator_loss(
   """
   with ops.name_scope(scope, 'generator_wasserstein_loss', (
       discriminator_gen_outputs, weights)) as scope:
-    discriminator_gen_outputs = math_ops.to_float(discriminator_gen_outputs)
+    discriminator_gen_outputs = _to_float(discriminator_gen_outputs)
 
     loss = - discriminator_gen_outputs
     loss = losses.compute_weighted_loss(
@@ -145,8 +149,8 @@ def wasserstein_discriminator_loss(
   with ops.name_scope(scope, 'discriminator_wasserstein_loss', (
       discriminator_real_outputs, discriminator_gen_outputs, real_weights,
       generated_weights)) as scope:
-    discriminator_real_outputs = math_ops.to_float(discriminator_real_outputs)
-    discriminator_gen_outputs = math_ops.to_float(discriminator_gen_outputs)
+    discriminator_real_outputs = _to_float(discriminator_real_outputs)
+    discriminator_gen_outputs = _to_float(discriminator_gen_outputs)
     discriminator_real_outputs.shape.assert_is_compatible_with(
         discriminator_gen_outputs.shape)
 
@@ -304,6 +308,8 @@ def wasserstein_gradient_penalty(
     discriminator_fn,
     discriminator_scope,
     epsilon=1e-10,
+    target=1.0,
+    one_sided=False,
     weights=1.0,
     scope=None,
     loss_collection=ops.GraphKeys.LOSSES,
@@ -319,10 +325,14 @@ def wasserstein_gradient_penalty(
     generated_data: Output of the generator.
     generator_inputs: Exact argument to pass to the generator, which is used
       as optional conditioning to the discriminator.
-    discriminator_fn: A discriminator function that conforms to TFGAN API.
+    discriminator_fn: A discriminator function that conforms to TF-GAN API.
     discriminator_scope: If not `None`, reuse discriminators from this scope.
     epsilon: A small positive number added for numerical stability when
       computing the gradient norm.
+    target: Optional Python number or `Tensor` indicating the target value of
+      gradient norm. Defaults to 1.0.
+    one_sided: If `True`, penalty proposed in https://arxiv.org/abs/1709.08894
+      is used. Defaults to `False`.
     weights: Optional `Tensor` whose rank is either 0, or the same rank as
       `real_data` and `generated_data`, and must be broadcastable to
       them (i.e., all dimensions must be either `1`, or the same as the
@@ -348,7 +358,8 @@ def wasserstein_gradient_penalty(
       raise ValueError('`generated_data` can\'t have unknown rank.')
 
     differences = generated_data - real_data
-    batch_size = differences.shape[0].value or array_ops.shape(differences)[0]
+    batch_size = differences.shape.dims[0].value or array_ops.shape(
+        differences)[0]
     alpha_shape = [batch_size] + [1] * (differences.shape.ndims - 1)
     alpha = random_ops.random_uniform(shape=alpha_shape)
     interpolates = real_data + (alpha * differences)
@@ -373,10 +384,13 @@ def wasserstein_gradient_penalty(
     # For numerical stability, add epsilon to the sum before taking the square
     # root. Note tf.norm does not add epsilon.
     slopes = math_ops.sqrt(gradient_squares + epsilon)
-    penalties = math_ops.square(slopes - 1.0)
+    penalties = slopes / target - 1.0
+    if one_sided:
+      penalties = math_ops.maximum(0., penalties)
+    penalties_squared = math_ops.square(penalties)
     penalty = losses.compute_weighted_loss(
-        penalties, weights, scope=scope, loss_collection=loss_collection,
-        reduction=reduction)
+        penalties_squared, weights, scope=scope,
+        loss_collection=loss_collection, reduction=reduction)
 
     if add_summaries:
       summary.scalar('gradient_penalty_loss', penalty)
@@ -638,7 +652,7 @@ def least_squares_generator_loss(
   """
   with ops.name_scope(scope, 'lsq_generator_loss',
                       (discriminator_gen_outputs, real_label)) as scope:
-    discriminator_gen_outputs = math_ops.to_float(discriminator_gen_outputs)
+    discriminator_gen_outputs = _to_float(discriminator_gen_outputs)
     loss = math_ops.squared_difference(
         discriminator_gen_outputs, real_label) / 2.0
     loss = losses.compute_weighted_loss(
@@ -661,7 +675,7 @@ def least_squares_discriminator_loss(
     loss_collection=ops.GraphKeys.LOSSES,
     reduction=losses.Reduction.SUM_BY_NONZERO_WEIGHTS,
     add_summaries=False):
-  """Least squares generator loss.
+  """Least squares discriminator loss.
 
   This loss comes from `Least Squares Generative Adversarial Networks`
   (https://arxiv.org/abs/1611.04076).
@@ -693,8 +707,8 @@ def least_squares_discriminator_loss(
   """
   with ops.name_scope(scope, 'lsq_discriminator_loss',
                       (discriminator_gen_outputs, real_label)) as scope:
-    discriminator_real_outputs = math_ops.to_float(discriminator_real_outputs)
-    discriminator_gen_outputs = math_ops.to_float(discriminator_gen_outputs)
+    discriminator_real_outputs = _to_float(discriminator_real_outputs)
+    discriminator_gen_outputs = _to_float(discriminator_gen_outputs)
     discriminator_real_outputs.shape.assert_is_compatible_with(
         discriminator_gen_outputs.shape)
 
@@ -729,11 +743,16 @@ def least_squares_discriminator_loss(
 def _validate_distributions(distributions):
   if not isinstance(distributions, (list, tuple)):
     raise ValueError('`distributions` must be a list or tuple. Instead, '
-                     'found %s.', type(distributions))
+                     'found %s.' % type(distributions))
   for x in distributions:
-    if not isinstance(x, ds.Distribution):
+    # We used to check with `isinstance(x, tf.distributions.Distribution)`.
+    # However, distributions have migrated to `tfp.distributions.Distribution`,
+    # which is a new code repo, so we can't check this way anymore until
+    # TF-GAN is migrated to a new repo as well.
+    # This new check is not sufficient, but is a useful heuristic for now.
+    if not callable(getattr(x, 'log_prob', None)):
       raise ValueError('`distributions` must be a list of `Distributions`. '
-                       'Instead, found %s.', type(x))
+                       'Instead, found %s.' % type(x))
 
 
 def _validate_information_penalty_inputs(
@@ -763,9 +782,9 @@ def mutual_information_penalty(
     structured_generator_inputs: A list of Tensors representing the random noise
       that must  have high mutual information with the generator output. List
       length should match `predicted_distributions`.
-    predicted_distributions: A list of tf.Distributions. Predicted by the
-      recognizer, and used to evaluate the likelihood of the structured noise.
-      List length should match `structured_generator_inputs`.
+    predicted_distributions: A list of `tfp.distributions.Distribution`s.
+      Predicted by the recognizer, and used to evaluate the likelihood of the
+      structured noise. List length should match `structured_generator_inputs`.
     weights: Optional `Tensor` whose rank is either 0, or the same dimensions as
       `structured_generator_inputs`.
     scope: The scope for the operations performed in computing the loss.
@@ -806,7 +825,7 @@ def _numerically_stable_global_norm(tensor_list):
   Returns:
     A scalar tensor with the global norm.
   """
-  if np.all([x is None for x in tensor_list]):
+  if all(x is None for x in tensor_list):
     return 0.0
 
   list_max = math_ops.reduce_max([math_ops.reduce_max(math_ops.abs(x)) for x in
@@ -915,3 +934,61 @@ def combine_adversarial_loss(main_loss,
                     array_ops.stop_gradient(adv_coeff) * adversarial_loss)
 
   return final_loss
+
+
+def cycle_consistency_loss(data_x,
+                           reconstructed_data_x,
+                           data_y,
+                           reconstructed_data_y,
+                           scope=None,
+                           add_summaries=False):
+  """Defines the cycle consistency loss.
+
+  The cyclegan model has two partial models where `model_x2y` generator F maps
+  data set X to Y, `model_y2x` generator G maps data set Y to X. For a `data_x`
+  in data set X, we could reconstruct it by
+  * reconstructed_data_x = G(F(data_x))
+  Similarly
+  * reconstructed_data_y = F(G(data_y))
+
+  The cycle consistency loss is about the difference between data and
+  reconstructed data, namely
+  * loss_x2x = |data_x - G(F(data_x))| (L1-norm)
+  * loss_y2y = |data_y - F(G(data_y))| (L1-norm)
+  * loss = (loss_x2x + loss_y2y) / 2
+  where `loss` is the final result.
+
+  For the L1-norm, we follow the original implementation:
+  https://github.com/junyanz/CycleGAN/blob/master/models/cycle_gan_model.lua
+  we use L1-norm of pixel-wise error normalized by data size such that
+  `cycle_loss_weight` can be specified independent of image size.
+
+  See https://arxiv.org/abs/1703.10593 for more details.
+
+  Args:
+    data_x: A `Tensor` of data X.
+    reconstructed_data_x: A `Tensor` of reconstructed data X.
+    data_y: A `Tensor` of data Y.
+    reconstructed_data_y: A `Tensor` of reconstructed data Y.
+    scope: The scope for the operations performed in computing the loss.
+      Defaults to None.
+    add_summaries: Whether or not to add detailed summaries for the loss.
+      Defaults to False.
+
+  Returns:
+    A scalar `Tensor` of cycle consistency loss.
+  """
+
+  with ops.name_scope(
+      scope,
+      'cycle_consistency_loss',
+      values=[data_x, reconstructed_data_x, data_y, reconstructed_data_y]):
+    loss_x2x = losses.absolute_difference(data_x, reconstructed_data_x)
+    loss_y2y = losses.absolute_difference(data_y, reconstructed_data_y)
+    loss = (loss_x2x + loss_y2y) / 2.0
+    if add_summaries:
+      summary.scalar('cycle_consistency_loss_x2x', loss_x2x)
+      summary.scalar('cycle_consistency_loss_y2y', loss_y2y)
+      summary.scalar('cycle_consistency_loss', loss)
+
+  return loss

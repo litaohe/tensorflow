@@ -25,6 +25,7 @@ limitations under the License.
 #include "tensorflow/core/kernels/ops_util.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/random/random.h"
+#include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
@@ -121,7 +122,7 @@ class ResizeBilinearOpTest : public OpsTestBase {
         TensorShape({batch_size, output_width, output_height, channels})));
     ResizeBilinearBaseline(input->tensor<float, 4>(),
                            expected->tensor<float, 4>());
-    test::ExpectTensorEqual<float>(*expected, *GetOutput(0));
+    test::ExpectClose(*expected, *GetOutput(0));
   }
 
   void RunManyRandomTests(int channels) {
@@ -176,7 +177,7 @@ TEST_F(ResizeBilinearOpTest, TestBilinear2x2To1x1) {
   // original input. In this case, we choose the top/left most pixel.
   Tensor expected(allocator(), DT_FLOAT, TensorShape({1, 1, 1, 1}));
   test::FillValues<float>(&expected, {1.0});
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpTest, TestBilinearRandom2x2To1x1) {
@@ -193,7 +194,7 @@ TEST_F(ResizeBilinearOpTest, TestBilinearRandom2x2To1x1) {
   ResizeBilinearBaseline(input->tensor<float, 4>(),
                          expected->tensor<float, 4>());
   EXPECT_EQ(input->flat<float>()(0), output->flat<float>()(0));
-  test::ExpectTensorEqual<float>(*expected, *output);
+  test::ExpectClose(*expected, *output);
 }
 
 TEST_F(ResizeBilinearOpAlignCornersTest, TestBilinearAlignCorners2x2To1x1) {
@@ -208,7 +209,7 @@ TEST_F(ResizeBilinearOpAlignCornersTest, TestBilinearAlignCorners2x2To1x1) {
   // original input. In this case, we choose the top/left most pixel.
   Tensor expected(allocator(), DT_FLOAT, TensorShape({1, 1, 1, 1}));
   test::FillValues<float>(&expected, {1.0});
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpTest, TestBilinear2x2To3x3) {
@@ -228,7 +229,7 @@ TEST_F(ResizeBilinearOpTest, TestBilinear2x2To3x3) {
      3,        11.0f / 3, 4});
 
   // clang-format on
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpAlignCornersTest, TestBilinearAlignCorners2x2To3x3) {
@@ -251,7 +252,7 @@ TEST_F(ResizeBilinearOpAlignCornersTest, TestBilinearAlignCorners2x2To3x3) {
      3,  3.5,  4});
 
   // clang-format on
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpTest, TestBilinear3x3To2x2) {
@@ -272,7 +273,7 @@ TEST_F(ResizeBilinearOpTest, TestBilinear3x3To2x2) {
      5.5,   7});
 
   // clang-format on
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpAlignCornersTest, TestBilinearAlignCorners3x3To2x2) {
@@ -293,7 +294,7 @@ TEST_F(ResizeBilinearOpAlignCornersTest, TestBilinearAlignCorners3x3To2x2) {
      7,  9});
 
   // clang-format on
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpTest, TestBilinear3x3To4x4) {
@@ -315,7 +316,7 @@ TEST_F(ResizeBilinearOpTest, TestBilinear3x3To4x4) {
      7,  7.75, 8.5, 9});
 
   // clang-format on
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpTest, TestBilinear4x4To3x3) {
@@ -339,7 +340,7 @@ TEST_F(ResizeBilinearOpTest, TestBilinear4x4To3x3) {
      35.0f/3, 39.0f/3, 43.0f/3});
 
   // clang-format on
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpAlignCornersTest, TestBilinearAlignCorners4x4To3x3) {
@@ -363,7 +364,7 @@ TEST_F(ResizeBilinearOpAlignCornersTest, TestBilinearAlignCorners4x4To3x3) {
      13, 14.5, 16});
 
   // clang-format on
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpTest, TestBilinear2x2To3x3Batch2) {
@@ -383,7 +384,7 @@ TEST_F(ResizeBilinearOpTest, TestBilinear2x2To3x3Batch2) {
      1, 5.0f/3, 2, 7.0f/3, 3, 10.0f/3, 3, 11.0f/3, 4
     });
   // clang-format on
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpTest, TestBilinear2x2x2To3x3x2) {
@@ -407,7 +408,7 @@ TEST_F(ResizeBilinearOpTest, TestBilinear2x2x2To3x3x2) {
       4,       -4
     });
   // clang-format on
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 TEST_F(ResizeBilinearOpTest, TestBilinear2x2To4x4) {
@@ -426,7 +427,7 @@ TEST_F(ResizeBilinearOpTest, TestBilinear2x2To4x4) {
      3,  3.5, 4, 4,
      3,  3.5, 4, 4});
   // clang-format on
-  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+  test::ExpectClose(expected, *GetOutput(0));
 }
 
 // similar_size case
@@ -457,9 +458,8 @@ TEST_F(ResizeBilinearOpTest, TestInvalidOutputSize) {
   AddInputFromArray<float>(TensorShape({1, 2, 2, 1}), {1, 2, 3, 4});
   AddInputFromArray<int32>(TensorShape({2}), {0, 0});
   Status s = RunOpKernel();
-  EXPECT_TRUE(
-      StringPiece(s.ToString())
-          .contains("Invalid argument: output dimensions must be positive"))
+  EXPECT_TRUE(str_util::StrContains(
+      s.ToString(), "Invalid argument: output dimensions must be positive"))
       << s;
 }
 
@@ -467,8 +467,8 @@ TEST_F(ResizeBilinearOpTest, TestInvalidInputShape) {
   AddInputFromArray<float>(TensorShape({2, 2, 1}), {1, 2, 3, 4});
   AddInputFromArray<int32>(TensorShape({2}), {4, 4});
   Status s = RunOpKernel();
-  EXPECT_TRUE(StringPiece(s.ToString())
-                  .contains("Invalid argument: input must be 4-dimensional"))
+  EXPECT_TRUE(str_util::StrContains(
+      s.ToString(), "Invalid argument: input must be 4-dimensional"))
       << s;
 }
 
@@ -476,8 +476,8 @@ TEST_F(ResizeBilinearOpTest, TestInvalidSizeDim) {
   AddInputFromArray<float>(TensorShape({1, 2, 2, 1}), {1, 2, 3, 4});
   AddInputFromArray<int32>(TensorShape({2, 1}), {4, 4});
   Status s = RunOpKernel();
-  EXPECT_TRUE(StringPiece(s.ToString())
-                  .contains("Invalid argument: shape_t must be 1-dimensional"))
+  EXPECT_TRUE(str_util::StrContains(
+      s.ToString(), "Invalid argument: shape_t must be 1-dimensional"))
       << s;
 }
 
@@ -485,8 +485,8 @@ TEST_F(ResizeBilinearOpTest, TestInvalidSizeElements) {
   AddInputFromArray<float>(TensorShape({1, 2, 2, 1}), {1, 2, 3, 4});
   AddInputFromArray<int32>(TensorShape({3}), {4, 4, 1});
   Status s = RunOpKernel();
-  EXPECT_TRUE(StringPiece(s.ToString())
-                  .contains("Invalid argument: shape_t must have two elements"))
+  EXPECT_TRUE(str_util::StrContains(
+      s.ToString(), "Invalid argument: shape_t must have two elements"))
       << s;
 }
 

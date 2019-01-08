@@ -15,83 +15,13 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/primitive_util.h"
 
+#include "absl/strings/ascii.h"
+#include "absl/strings/numbers.h"
+#include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/platform/logging.h"
 
 namespace xla {
 namespace primitive_util {
-
-template <>
-PrimitiveType NativeToPrimitiveType<bool>() {
-  return PRED;
-}
-
-// Unsigned integer
-template <>
-PrimitiveType NativeToPrimitiveType<uint8>() {
-  return U8;
-}
-
-template <>
-PrimitiveType NativeToPrimitiveType<uint16>() {
-  return U16;
-}
-
-template <>
-PrimitiveType NativeToPrimitiveType<uint32>() {
-  return U32;
-}
-
-template <>
-PrimitiveType NativeToPrimitiveType<uint64>() {
-  return U64;
-}
-
-// Signed integer
-template <>
-PrimitiveType NativeToPrimitiveType<int8>() {
-  return S8;
-}
-
-template <>
-PrimitiveType NativeToPrimitiveType<int16>() {
-  return S16;
-}
-
-template <>
-PrimitiveType NativeToPrimitiveType<int32>() {
-  return S32;
-}
-
-template <>
-PrimitiveType NativeToPrimitiveType<int64>() {
-  return S64;
-}
-
-// Floating point
-template <>
-PrimitiveType NativeToPrimitiveType<float>() {
-  return F32;
-}
-
-template <>
-PrimitiveType NativeToPrimitiveType<double>() {
-  return F64;
-}
-
-template <>
-PrimitiveType NativeToPrimitiveType<bfloat16>() {
-  return BF16;
-}
-
-template <>
-PrimitiveType NativeToPrimitiveType<half>() {
-  return F16;
-}
-
-template <>
-PrimitiveType NativeToPrimitiveType<complex64>() {
-  return C64;
-}
 
 bool IsFloatingPointType(PrimitiveType type) {
   return type == F16 || type == F32 || type == F64 || type == BF16;
@@ -156,6 +86,71 @@ PrimitiveType ComplexComponentType(PrimitiveType complex_type) {
       LOG(FATAL) << "Primitive type is not complex: "
                  << PrimitiveType_Name(complex_type);
   }
+}
+
+bool IsArrayType(PrimitiveType primitive_type) {
+  return primitive_type != PRIMITIVE_TYPE_INVALID && primitive_type != TUPLE &&
+         primitive_type != OPAQUE && primitive_type != TOKEN;
+}
+
+// Class to memoize the computation of
+//   absl::AsciiStrToLower(PrimitiveType_Name(p))
+// for all PrimitiveType values "p"
+class PrimitiveTypeNameGenerator {
+ public:
+  PrimitiveTypeNameGenerator() {
+    for (int i = 0; i < PrimitiveType_ARRAYSIZE; i++) {
+      if (PrimitiveType_IsValid(i)) {
+        lowercase_name_[i] = absl::AsciiStrToLower(
+            PrimitiveType_Name(static_cast<PrimitiveType>(i)));
+      }
+    }
+  }
+  const string& LowercaseName(PrimitiveType t) {
+    return lowercase_name_[static_cast<int>(t)];
+  }
+
+ private:
+  string lowercase_name_[PrimitiveType_ARRAYSIZE];
+};
+
+const string& LowercasePrimitiveTypeName(PrimitiveType s) {
+  static auto* gen = new PrimitiveTypeNameGenerator();
+  return gen->LowercaseName(s);
+}
+
+namespace {
+
+// Returns a map from lower-case primitive type name to primitive type.
+const std::unordered_map<string, PrimitiveType>& GetPrimitiveTypeStringMap() {
+  static std::unordered_map<string, PrimitiveType>* name_to_type = [] {
+    static auto* map = new std::unordered_map<string, PrimitiveType>;
+    for (int i = 0; i < PrimitiveType_ARRAYSIZE; i++) {
+      if (PrimitiveType_IsValid(i) && i != PRIMITIVE_TYPE_INVALID) {
+        auto value = static_cast<PrimitiveType>(i);
+        (*map)[LowercasePrimitiveTypeName(value)] = value;
+      }
+    }
+    return map;
+  }();
+  return *name_to_type;
+}
+
+}  // namespace
+
+StatusOr<PrimitiveType> StringToPrimitiveType(absl::string_view name) {
+  const auto& map = GetPrimitiveTypeStringMap();
+  auto found = map.find(string(name));
+  if (found == map.end()) {
+    return InvalidArgument("Invalid element type string: \"%s\".", name);
+  }
+  return found->second;
+}
+
+bool IsPrimitiveTypeName(absl::string_view name) {
+  const auto& map = GetPrimitiveTypeStringMap();
+  auto found = map.find(string(name));
+  return found != map.end();
 }
 
 }  // namespace primitive_util

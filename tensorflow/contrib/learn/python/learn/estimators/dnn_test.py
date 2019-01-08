@@ -38,7 +38,7 @@ from tensorflow.contrib.learn.python.learn.estimators import run_config
 from tensorflow.contrib.learn.python.learn.estimators import test_data
 from tensorflow.contrib.learn.python.learn.metric_spec import MetricSpec
 from tensorflow.contrib.metrics.python.ops import metric_ops
-from tensorflow.python.feature_column import feature_column as fc_core
+from tensorflow.python.feature_column import feature_column_lib as fc_core
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import sparse_tensor
@@ -1224,7 +1224,7 @@ class DNNRegressorTest(test.TestCase):
       self, predictions, expected_shape):
     predictions_nparray = np.array(predictions)
     self.assertAllEqual(expected_shape, predictions_nparray.shape)
-    self.assertTrue(np.issubdtype(predictions_nparray.dtype, np.float))
+    self.assertTrue(np.issubdtype(predictions_nparray.dtype, np.floating))
 
   def testPredict_AsIterableFalse(self):
     """Tests predict method with as_iterable=False."""

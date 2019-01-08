@@ -24,6 +24,7 @@ import math
 
 import numpy as np
 
+from tensorflow.contrib.framework.python.framework import tensor_util
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_shape
@@ -107,13 +108,14 @@ def _prepare_memory(memory, memory_sequence_length, check_inner_dims_defined):
         maxlen=array_ops.shape(nest.flatten(memory)[0])[1],
         dtype=nest.flatten(memory)[0].dtype)
     seq_len_batch_size = (
-        memory_sequence_length.shape[0].value
+        tensor_shape.dimension_value(memory_sequence_length.shape[0])
         or array_ops.shape(memory_sequence_length)[0])
   def _maybe_mask(m, seq_len_mask):
     rank = m.get_shape().ndims
     rank = rank if rank is not None else array_ops.rank(m)
     extra_ones = array_ops.ones(rank - 2, dtype=dtypes.int32)
-    m_batch_size = m.shape[0].value or array_ops.shape(m)[0]
+    m_batch_size = tensor_shape.dimension_value(
+        m.shape[0]) or array_ops.shape(m)[0]
     if memory_sequence_length is not None:
       message = ("memory_sequence_length and memory tensor batch sizes do not "
                  "match.")
@@ -214,9 +216,10 @@ class _BaseAttentionMechanism(AttentionMechanism):
           self.memory_layer(self._values) if self.memory_layer  # pylint: disable=not-callable
           else self._values)
       self._batch_size = (
-          self._keys.shape[0].value or array_ops.shape(self._keys)[0])
-      self._alignments_size = (self._keys.shape[1].value or
-                               array_ops.shape(self._keys)[1])
+          tensor_shape.dimension_value(self._keys.shape[0]) or
+          array_ops.shape(self._keys)[0])
+      self._alignments_size = (tensor_shape.dimension_value(self._keys.shape[1])
+                               or array_ops.shape(self._keys)[1])
 
   @property
   def memory_layer(self):
@@ -330,7 +333,7 @@ def _luong_score(query, keys, scale):
   # batched matmul on:
   #   [batch_size, 1, depth] . [batch_size, depth, max_time]
   # resulting in an output shape of:
-  #   [batch_time, 1, max_time].
+  #   [batch_size, 1, max_time].
   # we then squeeze out the center singleton dimension.
   score = math_ops.matmul(query, keys, transpose_b=True)
   score = array_ops.squeeze(score, [1])
@@ -338,7 +341,8 @@ def _luong_score(query, keys, scale):
   if scale:
     # Scalar used in weight scaling
     g = variable_scope.get_variable(
-        "attention_g", dtype=dtype, initializer=1.)
+        "attention_g", dtype=dtype,
+        initializer=init_ops.ones_initializer, shape=())
     score = g * score
   return score
 
@@ -380,8 +384,8 @@ class LuongAttention(_BaseAttentionMechanism):
         for values past the respective sequence lengths.
       scale: Python boolean.  Whether to scale the energy term.
       probability_fn: (optional) A `callable`.  Converts the score to
-        probabilities.  The default is @{tf.nn.softmax}. Other options include
-        @{tf.contrib.seq2seq.hardmax} and @{tf.contrib.sparsemax.sparsemax}.
+        probabilities.  The default is `tf.nn.softmax`. Other options include
+        `tf.contrib.seq2seq.hardmax` and `tf.contrib.sparsemax.sparsemax`.
         Its signature should be: `probabilities = probability_fn(score)`.
       score_mask_value: (optional) The mask value for score before passing into
         `probability_fn`. The default is -inf. Only used if
@@ -461,7 +465,8 @@ def _bahdanau_score(processed_query, keys, normalize):
   """
   dtype = processed_query.dtype
   # Get the number of hidden units from the trailing dimension of keys
-  num_units = keys.shape[2].value or array_ops.shape(keys)[2]
+  num_units = tensor_shape.dimension_value(
+      keys.shape[2]) or array_ops.shape(keys)[2]
   # Reshape from [batch_size, ...] to [batch_size, 1, ...] for broadcasting.
   processed_query = array_ops.expand_dims(processed_query, 1)
   v = variable_scope.get_variable(
@@ -470,7 +475,8 @@ def _bahdanau_score(processed_query, keys, normalize):
     # Scalar used in weight normalization
     g = variable_scope.get_variable(
         "attention_g", dtype=dtype,
-        initializer=math.sqrt((1. / num_units)))
+        initializer=init_ops.constant_initializer(math.sqrt((1. / num_units))),
+        shape=())
     # Bias added prior to the nonlinearity
     b = variable_scope.get_variable(
         "attention_b", [num_units], dtype=dtype,
@@ -526,8 +532,8 @@ class BahdanauAttention(_BaseAttentionMechanism):
         for values past the respective sequence lengths.
       normalize: Python boolean.  Whether to normalize the energy term.
       probability_fn: (optional) A `callable`.  Converts the score to
-        probabilities.  The default is @{tf.nn.softmax}. Other options include
-        @{tf.contrib.seq2seq.hardmax} and @{tf.contrib.sparsemax.sparsemax}.
+        probabilities.  The default is `tf.nn.softmax`. Other options include
+        `tf.contrib.seq2seq.hardmax` and `tf.contrib.sparsemax.sparsemax`.
         Its signature should be: `probabilities = probability_fn(score)`.
       score_mask_value: (optional): The mask value for score before passing into
         `probability_fn`. The default is -inf. Only used if
@@ -608,8 +614,8 @@ def monotonic_attention(p_choose_i, previous_attention, mode):
   addition, once an input sequence element is attended to at a given output
   timestep, elements occurring before it cannot be attended to at subsequent
   output timesteps.  This function generates attention distributions according
-  to these assumptions.  For more information, see ``Online and Linear-Time
-  Attention by Enforcing Monotonic Alignments''.
+  to these assumptions.  For more information, see `Online and Linear-Time
+  Attention by Enforcing Monotonic Alignments`.
 
   Args:
     p_choose_i: Probability of choosing input sequence/memory element i.  Should
@@ -646,13 +652,14 @@ def monotonic_attention(p_choose_i, previous_attention, mode):
   previous_attention = ops.convert_to_tensor(
       previous_attention, name="previous_attention")
   if mode == "recursive":
-    # Use .shape[0].value when it's not None, or fall back on symbolic shape
-    batch_size = p_choose_i.shape[0].value or array_ops.shape(p_choose_i)[0]
+    # Use .shape[0] when it's not None, or fall back on symbolic shape
+    batch_size = tensor_shape.dimension_value(
+        p_choose_i.shape[0]) or array_ops.shape(p_choose_i)[0]
     # Compute [1, 1 - p_choose_i[0], 1 - p_choose_i[1], ..., 1 - p_choose_i[-2]]
     shifted_1mp_choose_i = array_ops.concat(
         [array_ops.ones((batch_size, 1)), 1 - p_choose_i[:, :-1]], 1)
     # Compute attention distribution recursively as
-    # q[i] = (1 - p_choose_i[i])*q[i - 1] + previous_attention[i]
+    # q[i] = (1 - p_choose_i[i - 1])*q[i - 1] + previous_attention[i]
     # attention[i] = p_choose_i[i]*q[i]
     attention = p_choose_i*array_ops.transpose(functional_ops.scan(
         # Need to use reshape to remind TF of the shape between loop iterations
@@ -735,7 +742,7 @@ class _BaseMonotonicAttentionMechanism(_BaseAttentionMechanism):
   """Base attention mechanism for monotonic attention.
 
   Simply overrides the initial_alignments function to provide a dirac
-  distribution,which is needed in order for the monotonic attention
+  distribution, which is needed in order for the monotonic attention
   distributions to have the correct behavior.
   """
 
@@ -762,7 +769,7 @@ class _BaseMonotonicAttentionMechanism(_BaseAttentionMechanism):
 class BahdanauMonotonicAttention(_BaseMonotonicAttentionMechanism):
   """Monotonic attention mechanism with Bahadanau-style energy function.
 
-  This type of attention encorces a monotonic constraint on the attention
+  This type of attention enforces a monotonic constraint on the attention
   distributions; that is once the model attends to a given point in the memory
   it can't attend to any prior points at subsequence output timesteps.  It
   achieves this by using the _monotonic_probability_fn instead of softmax to
@@ -866,7 +873,7 @@ class BahdanauMonotonicAttention(_BaseMonotonicAttentionMechanism):
 class LuongMonotonicAttention(_BaseMonotonicAttentionMechanism):
   """Monotonic attention mechanism with Luong-style energy function.
 
-  This type of attention encorces a monotonic constraint on the attention
+  This type of attention enforces a monotonic constraint on the attention
   distributions; that is once the model attends to a given point in the memory
   it can't attend to any prior points at subsequence output timesteps.  It
   achieves this by using the _monotonic_probability_fn instead of softmax to
@@ -923,8 +930,7 @@ class LuongMonotonicAttention(_BaseMonotonicAttentionMechanism):
         _monotonic_probability_fn, sigmoid_noise=sigmoid_noise, mode=mode,
         seed=sigmoid_noise_seed)
     super(LuongMonotonicAttention, self).__init__(
-        query_layer=layers_core.Dense(
-            num_units, name="query_layer", use_bias=False, dtype=dtype),
+        query_layer=None,
         memory_layer=layers_core.Dense(
             num_units, name="memory_layer", use_bias=False, dtype=dtype),
         memory=memory,
@@ -989,6 +995,10 @@ class AttentionWrapperState(
   def clone(self, **kwargs):
     """Clone this object, overriding components provided by kwargs.
 
+    The new state fields' shape must match original state fields' shape. This
+    will be validated, and original fields' shape will be propagated to new
+    fields.
+
     Example:
 
     ```python
@@ -1004,7 +1014,16 @@ class AttentionWrapperState(
       A new `AttentionWrapperState` whose properties are the same as
       this one, except any overridden properties as provided in `kwargs`.
     """
-    return super(AttentionWrapperState, self)._replace(**kwargs)
+    def with_same_shape(old, new):
+      """Check and set new tensor's shape."""
+      if isinstance(old, ops.Tensor) and isinstance(new, ops.Tensor):
+        return tensor_util.with_same_shape(old, new)
+      return new
+
+    return nest.map_structure(
+        with_same_shape,
+        self,
+        super(AttentionWrapperState, self)._replace(**kwargs))
 
 
 def hardmax(logits, name=None):
@@ -1020,8 +1039,8 @@ def hardmax(logits, name=None):
   """
   with ops.name_scope(name, "Hardmax", [logits]):
     logits = ops.convert_to_tensor(logits, name="logits")
-    if logits.get_shape()[-1].value is not None:
-      depth = logits.get_shape()[-1].value
+    if tensor_shape.dimension_value(logits.get_shape()[-1]) is not None:
+      depth = tensor_shape.dimension_value(logits.get_shape()[-1])
     else:
       depth = array_ops.shape(logits)[-1]
     return array_ops.one_hot(
@@ -1068,14 +1087,16 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
                cell_input_fn=None,
                output_attention=True,
                initial_cell_state=None,
-               name=None):
+               name=None,
+               attention_layer=None,
+               attention_fn=None):
     """Construct the `AttentionWrapper`.
 
     **NOTE** If you are using the `BeamSearchDecoder` with a cell wrapped in
     `AttentionWrapper`, then you must ensure that:
 
     - The encoder output has been tiled to `beam_width` via
-      @{tf.contrib.seq2seq.tile_batch} (NOT `tf.tile`).
+      `tf.contrib.seq2seq.tile_batch` (NOT `tf.tile`).
     - The `batch_size` argument passed to the `zero_state` method of this
       wrapper is equal to `true_batch_size * beam_width`.
     - The initial state created with `zero_state` above contains a
@@ -1111,7 +1132,10 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
         (default), use the context as attention at each time step. Otherwise,
         feed the context and cell output into the attention layer to generate
         attention at each time step. If attention_mechanism is a list,
-        attention_layer_size must be a list of the same length.
+        attention_layer_size must be a list of the same length. If
+        attention_layer is set, this must be None. If attention_fn is set,
+        it must guaranteed that the outputs of attention_fn also meet the
+        above requirements.
       alignment_history: Python boolean, whether to store alignment history
         from all time steps in the final output state (currently stored as a
         time major `TensorArray` on which you must call `stack()`).
@@ -1120,7 +1144,7 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
       output_attention: Python bool.  If `True` (default), the output at each
         time step is the attention value.  This is the behavior of Luong-style
         attention mechanisms.  If `False`, the output at each time step is
-        the output of `cell`.  This is the beahvior of Bhadanau-style
+        the output of `cell`.  This is the behavior of Bhadanau-style
         attention mechanisms.  In both cases, the `attention` tensor is
         propagated to the next time step via the state and is used there.
         This flag only controls whether the attention mechanism is propagated
@@ -1131,17 +1155,28 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
         does not match the batch size of `initial_cell_state`, proper
         behavior is not guaranteed.
       name: Name to use when creating ops.
+      attention_layer: A list of `tf.layers.Layer` instances or a
+        single `tf.layers.Layer` instance taking the context and cell output as
+        inputs to generate attention at each time step. If None (default), use
+        the context as attention at each time step. If attention_mechanism is a
+        list, attention_layer must be a list of the same length. If
+        attention_layers_size is set, this must be None.
+      attention_fn: An optional callable function that allows users to provide
+        their own customized attention function, which takes input
+        (attention_mechanism, cell_output, attention_state, attention_layer) and
+        outputs (attention, alignments, next_attention_state). If provided,
+        the attention_layer_size should be the size of the outputs of
+        attention_fn.
 
     Raises:
       TypeError: `attention_layer_size` is not None and (`attention_mechanism`
         is a list but `attention_layer_size` is not; or vice versa).
       ValueError: if `attention_layer_size` is not None, `attention_mechanism`
-        is a list, and its length does not match that of `attention_layer_size`.
+        is a list, and its length does not match that of `attention_layer_size`;
+        if `attention_layer_size` and `attention_layer` are set simultaneously.
     """
     super(AttentionWrapper, self).__init__(name=name)
-    if not rnn_cell_impl._like_rnncell(cell):  # pylint: disable=protected-access
-      raise TypeError(
-          "cell must be an RNNCell, saw type: %s" % type(cell).__name__)
+    rnn_cell_impl.assert_like_rnncell("cell", cell)
     if isinstance(attention_mechanism, (list, tuple)):
       self._is_multi = True
       attention_mechanisms = attention_mechanism
@@ -1169,6 +1204,10 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
             "cell_input_fn must be callable, saw type: %s"
             % type(cell_input_fn).__name__)
 
+    if attention_layer_size is not None and attention_layer is not None:
+      raise ValueError("Only one of attention_layer_size and attention_layer "
+                       "should be set")
+
     if attention_layer_size is not None:
       attention_layer_sizes = tuple(
           attention_layer_size
@@ -1187,11 +1226,32 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
               dtype=attention_mechanisms[i].dtype)
           for i, attention_layer_size in enumerate(attention_layer_sizes))
       self._attention_layer_size = sum(attention_layer_sizes)
+    elif attention_layer is not None:
+      self._attention_layers = tuple(
+          attention_layer
+          if isinstance(attention_layer, (list, tuple))
+          else (attention_layer,))
+      if len(self._attention_layers) != len(attention_mechanisms):
+        raise ValueError(
+            "If provided, attention_layer must contain exactly one "
+            "layer per attention_mechanism, saw: %d vs %d"
+            % (len(self._attention_layers), len(attention_mechanisms)))
+      self._attention_layer_size = sum(
+          tensor_shape.dimension_value(layer.compute_output_shape(
+              [None,
+               cell.output_size + tensor_shape.dimension_value(
+                   mechanism.values.shape[-1])])[-1])
+          for layer, mechanism in zip(
+              self._attention_layers, attention_mechanisms))
     else:
       self._attention_layers = None
       self._attention_layer_size = sum(
-          attention_mechanism.values.get_shape()[-1].value
+          tensor_shape.dimension_value(attention_mechanism.values.shape[-1])
           for attention_mechanism in attention_mechanisms)
+
+    if attention_fn is None:
+      attention_fn = _compute_attention
+    self._attention_fn = attention_fn
 
     self._cell = cell
     self._attention_mechanisms = attention_mechanisms
@@ -1204,7 +1264,7 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
       else:
         final_state_tensor = nest.flatten(initial_cell_state)[-1]
         state_batch_size = (
-            final_state_tensor.shape[0].value
+            tensor_shape.dimension_value(final_state_tensor.shape[0])
             or array_ops.shape(final_state_tensor)[0])
         error_message = (
             "When constructing AttentionWrapper %s: " % self._base_name +
@@ -1267,7 +1327,8 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
         attention_state=self._item_or_tuple(
             a.state_size for a in self._attention_mechanisms),
         alignment_history=self._item_or_tuple(
-            () for _ in self._attention_mechanisms))  # sometimes a TensorArray
+            a.alignments_size if self._alignment_history else ()
+            for a in self._attention_mechanisms))  # sometimes a TensorArray
 
   def zero_state(self, batch_size, dtype):
     """Return an initial (zero) state tuple for this `AttentionWrapper`.
@@ -1307,22 +1368,26 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
         cell_state = nest.map_structure(
             lambda s: array_ops.identity(s, name="checked_cell_state"),
             cell_state)
+      initial_alignments = [
+          attention_mechanism.initial_alignments(batch_size, dtype)
+          for attention_mechanism in self._attention_mechanisms]
       return AttentionWrapperState(
           cell_state=cell_state,
           time=array_ops.zeros([], dtype=dtypes.int32),
           attention=_zero_state_tensors(self._attention_layer_size, batch_size,
                                         dtype),
-          alignments=self._item_or_tuple(
-              attention_mechanism.initial_alignments(batch_size, dtype)
-              for attention_mechanism in self._attention_mechanisms),
+          alignments=self._item_or_tuple(initial_alignments),
           attention_state=self._item_or_tuple(
               attention_mechanism.initial_state(batch_size, dtype)
               for attention_mechanism in self._attention_mechanisms),
           alignment_history=self._item_or_tuple(
-              tensor_array_ops.TensorArray(dtype=dtype, size=0,
-                                           dynamic_size=True)
+              tensor_array_ops.TensorArray(
+                  dtype,
+                  size=0,
+                  dynamic_size=True,
+                  element_shape=alignment.shape)
               if self._alignment_history else ()
-              for _ in self._attention_mechanisms))
+              for alignment in initial_alignments))
 
   def call(self, inputs, state):
     """Perform a step of attention-wrapped RNN.
@@ -1365,7 +1430,8 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
     cell_output, next_cell_state = self._cell(cell_inputs, cell_state)
 
     cell_batch_size = (
-        cell_output.shape[0].value or array_ops.shape(cell_output)[0])
+        tensor_shape.dimension_value(cell_output.shape[0]) or
+        array_ops.shape(cell_output)[0])
     error_message = (
         "When applying AttentionWrapper %s: " % self.name +
         "Non-matching batch sizes between the memory "
@@ -1390,7 +1456,7 @@ class AttentionWrapper(rnn_cell_impl.RNNCell):
     all_attention_states = []
     maybe_all_histories = []
     for i, attention_mechanism in enumerate(self._attention_mechanisms):
-      attention, alignments, next_attention_state = _compute_attention(
+      attention, alignments, next_attention_state = self._attention_fn(
           attention_mechanism, cell_output, previous_attention_state[i],
           self._attention_layers[i] if self._attention_layers else None)
       alignment_history = previous_alignment_history[i].write(

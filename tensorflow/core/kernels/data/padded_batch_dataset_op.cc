@@ -12,118 +12,24 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include "tensorflow/core/framework/dataset.h"
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_util.h"
-#include "tensorflow/core/kernels/data/dataset.h"
+#include "tensorflow/core/util/batch_util.h"
 
 namespace tensorflow {
-
+namespace data {
 namespace {
 
-// See documentation in ../ops/dataset_ops.cc for a high-level
+// See documentation in ../../ops/dataset_ops.cc for a high-level
 // description of the following op.
-
-// The following five functions are copied from padding_fifo_queue.cc.
-// TODO(mrry): Reconcile these functions with the similar methods in the
-// queue implementation.
-Status ValidateElementToLargerSlice(const Tensor& element, Tensor* parent) {
-  DCHECK_NE(parent->dim_size(0), 0);
-  if (element.NumElements() > (parent->NumElements() / parent->dim_size(0))) {
-    TensorShape chip_shape = parent->shape();
-    chip_shape.RemoveDim(0);
-    return errors::Internal(
-        "HandleElementToLargerSlice Cannot copy slice: number of entries in "
-        "element is greater than number of elements in parent slice.  ",
-        "Shapes are: [element]: ", element.shape().DebugString(),
-        ", [parent slice]: ", chip_shape.DebugString());
-  }
-  return Status::OK();
-}
-
-template <typename T, int NDIMS>
-Status HandleElementToLargerSlice(const Tensor& element, Tensor* parent,
-                                  int index) {
-  TF_RETURN_IF_ERROR(ValidateElementToLargerSlice(element, parent));
-  if (element.NumElements() == 0) {
-    return Status::OK();
-  }
-  auto element_t = element.tensor<T, NDIMS>();
-  auto parent_t = parent->tensor<T, NDIMS + 1>();
-  Eigen::DSizes<Eigen::DenseIndex, NDIMS + 1> slice_indices;
-  slice_indices[0] = index;
-  Eigen::DSizes<Eigen::DenseIndex, NDIMS + 1> slice_size;
-  slice_size[0] = 1;
-  for (size_t i = 1; i < slice_size.size(); ++i) {
-    slice_size[i] = element_t.dimension(i - 1);
-  }
-  parent_t.slice(slice_indices, slice_size) = element_t.reshape(slice_size);
-  return Status::OK();
-}
-
-template <int NDIMS>
-Status HandleElementToLargerSliceWithRank(const Tensor& element, Tensor* parent,
-                                          int index) {
-#define HANDLE_TYPE(T)                                                   \
-  case DataTypeToEnum<T>::value: {                                       \
-    return HandleElementToLargerSlice<T, NDIMS>(element, parent, index); \
-  }
-
-  switch (element.dtype()) {
-    TF_CALL_DATASET_TYPES(HANDLE_TYPE);
-#undef HANDLE_TYPE
-    default:
-      return errors::Unimplemented(
-          "HandleElementToLargerSliceWithRank Unhandled data type: ",
-          element.dtype());
-  }
-}
-
-Status CopyElementToLargerSlice(const Tensor& element, Tensor* parent,
-                                int index) {
-  if (parent->dims() != element.dims() + 1) {
-    return errors::Internal(
-        "Mismatched ranks.  Element's rank is: ", element.dims(),
-        " but element is meant to be a slice in output Tensor having rank: ",
-        parent->dims(), " (should be: ", element.dims() + 1, ")");
-  }
-
-#define HANDLE_DIMS(NDIMS)                                                  \
-  case NDIMS: {                                                             \
-    TF_RETURN_IF_ERROR(                                                     \
-        HandleElementToLargerSliceWithRank<NDIMS>(element, parent, index)); \
-    return Status::OK();                                                    \
-  }
-
-  switch (element.dims()) {
-    HANDLE_DIMS(0);
-    HANDLE_DIMS(1);
-    HANDLE_DIMS(2);
-    HANDLE_DIMS(3);
-    HANDLE_DIMS(4);
-#undef HANDLE_DIMS
-    default:
-      return errors::Unimplemented("CopyElementToLargerSlice Unhandled rank: ",
-                                   element.dims());
-  }
-}
-
-Status SetElementZero(Tensor* element, const Tensor& padding) {
-#define HANDLE_TYPE(T)                                     \
-  if (element->dtype() == DataTypeToEnum<T>::value) {      \
-    element->flat<T>().setConstant(padding.scalar<T>()()); \
-    return Status::OK();                                   \
-  }
-  TF_CALL_DATASET_TYPES(HANDLE_TYPE);
-#undef HANDLE_TYPE
-  return errors::Unimplemented("SetElementZero Unhandled data type: ",
-                               element->dtype());
-}
 
 class PaddedBatchDatasetOp : public UnaryDatasetOpKernel {
  public:
   explicit PaddedBatchDatasetOp(OpKernelConstruction* ctx)
-      : UnaryDatasetOpKernel(ctx) {}
+      : UnaryDatasetOpKernel(ctx),
+        op_version_(ctx->def().op() == "PaddedBatchDataset" ? 1 : 2) {}
 
   void MakeDataset(OpKernelContext* ctx, DatasetBase* input,
                    DatasetBase** output) override {
@@ -133,6 +39,12 @@ class PaddedBatchDatasetOp : public UnaryDatasetOpKernel {
     OP_REQUIRES(
         ctx, batch_size > 0,
         errors::InvalidArgument("Batch size must be greater than zero."));
+
+    bool drop_remainder = false;
+    if (op_version_ > 1) {
+      OP_REQUIRES_OK(ctx, ParseScalarArgument<bool>(ctx, "drop_remainder",
+                                                    &drop_remainder));
+    }
 
     OpInputList padded_shape_tensors;
     OP_REQUIRES_OK(ctx,
@@ -180,18 +92,20 @@ class PaddedBatchDatasetOp : public UnaryDatasetOpKernel {
       padding_values.push_back(tensor::DeepCopy(padding_value_t));
     }
 
-    *output = new Dataset(ctx, batch_size, std::move(padded_shapes),
-                          std::move(padding_values), input);
+    *output =
+        new Dataset(ctx, batch_size, drop_remainder, std::move(padded_shapes),
+                    std::move(padding_values), input);
   }
 
  private:
-  class Dataset : public GraphDatasetBase {
+  class Dataset : public DatasetBase {
    public:
-    Dataset(OpKernelContext* ctx, int64 batch_size,
+    Dataset(OpKernelContext* ctx, int64 batch_size, bool drop_remainder,
             std::vector<PartialTensorShape> padded_shapes,
             std::vector<Tensor> padding_values, const DatasetBase* input)
-        : GraphDatasetBase(ctx),
+        : DatasetBase(DatasetContext(ctx)),
           batch_size_(batch_size),
+          drop_remainder_(drop_remainder),
           padded_shapes_(std::move(padded_shapes)),
           padding_values_(std::move(padding_values)),
           input_(input) {
@@ -207,14 +121,19 @@ class PaddedBatchDatasetOp : public UnaryDatasetOpKernel {
       const auto& input_shapes = input_->output_shapes();
       output_shapes_.reserve(input_shapes.size());
       for (size_t i = 0; i < input_shapes.size(); ++i) {
-        output_shapes_.push_back(
-            PartialTensorShape({-1}).Concatenate(padded_shapes_[i]));
+        if (drop_remainder_) {
+          output_shapes_.push_back(
+              PartialTensorShape({batch_size_}).Concatenate(padded_shapes_[i]));
+        } else {
+          output_shapes_.push_back(
+              PartialTensorShape({-1}).Concatenate(padded_shapes_[i]));
+        }
       }
     }
 
     ~Dataset() override { input_->Unref(); }
 
-    std::unique_ptr<IteratorBase> MakeIterator(
+    std::unique_ptr<IteratorBase> MakeIteratorInternal(
         const string& prefix) const override {
       return std::unique_ptr<IteratorBase>(
           new Iterator({this, strings::StrCat(prefix, "::PaddedBatch")}));
@@ -228,16 +147,26 @@ class PaddedBatchDatasetOp : public UnaryDatasetOpKernel {
       return output_shapes_;
     }
 
-    string DebugString() override {
+    string DebugString() const override {
       return strings::StrCat("PaddedBatchDatasetOp(", batch_size_,
                              ")::Dataset");
     }
 
+    int64 Cardinality() const override {
+      int64 n = input_->Cardinality();
+      if (n == kInfiniteCardinality || n == kUnknownCardinality) {
+        return n;
+      }
+      return n / batch_size_ +
+             (n % batch_size_ == 0 || drop_remainder_ ? 0 : 1);
+    }
+
    protected:
-    Status AsGraphDefInternal(OpKernelContext* ctx, DatasetGraphDefBuilder* b,
+    Status AsGraphDefInternal(SerializationContext* ctx,
+                              DatasetGraphDefBuilder* b,
                               Node** output) const override {
       Node* input_graph_node = nullptr;
-      TF_RETURN_IF_ERROR(b->AddParentDataset(ctx, input_, &input_graph_node));
+      TF_RETURN_IF_ERROR(b->AddInputDataset(ctx, input_, &input_graph_node));
       Node* batch_size = nullptr;
       TF_RETURN_IF_ERROR(b->AddScalar(batch_size_, &batch_size));
 
@@ -261,16 +190,19 @@ class PaddedBatchDatasetOp : public UnaryDatasetOpKernel {
         padding_values.emplace_back(node);
       }
 
+      Node* drop_remainder = nullptr;
+      TF_RETURN_IF_ERROR(b->AddScalar(drop_remainder_, &drop_remainder));
+
       AttrValue output_types;
       b->BuildAttrValue(output_dtypes(), &output_types);
 
       AttrValue N;
       b->BuildAttrValue<int64>(padded_shapes_.size(), &N);
 
-      TF_RETURN_IF_ERROR(
-          b->AddDataset(this, {{0, input_graph_node}, {1, batch_size}},
-                        {{2, padded_shapes}, {3, padding_values}},
-                        {{"Toutput_types", output_types}, {"N", N}}, output));
+      TF_RETURN_IF_ERROR(b->AddDataset(
+          this, {{0, input_graph_node}, {1, batch_size}, {4, drop_remainder}},
+          {{2, padded_shapes}, {3, padding_values}},
+          {{"Toutput_types", output_types}, {"N", N}}, output));
       return Status::OK();
     }
 
@@ -281,8 +213,11 @@ class PaddedBatchDatasetOp : public UnaryDatasetOpKernel {
     class Iterator : public DatasetIterator<Dataset> {
      public:
       explicit Iterator(const Params& params)
-          : DatasetIterator<Dataset>(params),
-            input_impl_(params.dataset->input_->MakeIterator(params.prefix)) {}
+          : DatasetIterator<Dataset>(params) {}
+
+      Status Initialize(IteratorContext* ctx) override {
+        return dataset()->input_->MakeIterator(ctx, prefix(), &input_impl_);
+      }
 
       Status GetNextInternal(IteratorContext* ctx,
                              std::vector<Tensor>* out_tensors,
@@ -315,6 +250,12 @@ class PaddedBatchDatasetOp : public UnaryDatasetOpKernel {
 
         if (batch_elements.empty()) {
           DCHECK(*end_of_sequence);
+          return Status::OK();
+        }
+
+        if (dataset()->drop_remainder_ &&
+            batch_elements.size() < dataset()->batch_size_) {
+          *end_of_sequence = true;
           return Status::OK();
         }
 
@@ -376,45 +317,59 @@ class PaddedBatchDatasetOp : public UnaryDatasetOpKernel {
 
           // 2. Copy each batch element to the appropriate location in
           // the output component tensor.
-          Tensor batch_component(cpu_allocator(),
-                                 output_dtypes()[component_index],
-                                 batch_component_shape);
-          TF_RETURN_IF_ERROR(SetElementZero(
+          out_tensors->emplace_back(ctx->allocator({}),
+                                    output_dtypes()[component_index],
+                                    batch_component_shape);
+          Tensor& batch_component = out_tensors->back();
+          TF_RETURN_IF_ERROR(batch_util::SetElementZero(
               &batch_component, dataset()->padding_values_[component_index]));
 
           // Build the output tuple component by copying one slice
           // from each input element in the batch.
-          for (int64 i = 0; i < num_batch_elements; ++i) {
-            TF_RETURN_IF_ERROR(ValidateElementToLargerSlice(
-                batch_elements[i][component_index], &batch_component));
-
-            TF_RETURN_IF_ERROR(CopyElementToLargerSlice(
-                batch_elements[i][component_index], &batch_component, i));
+          TensorShape component_shape({});
+          for (int i = 1; i < batch_component_shape.dims(); ++i) {
+            component_shape.AddDim(batch_component_shape.dim_size(i));
           }
-          out_tensors->push_back(std::move(batch_component));
+          for (int64 i = 0; i < num_batch_elements; ++i) {
+            // Take the fast path if possible.
+            if (batch_elements[i][component_index].shape() == component_shape) {
+              TF_RETURN_IF_ERROR(batch_util::CopyElementToSlice(
+                  batch_elements[i][component_index], &batch_component, i));
+            } else {
+              TF_RETURN_IF_ERROR(batch_util::CopyElementToLargerSlice(
+                  batch_elements[i][component_index], &batch_component, i));
+            }
+          }
         }
         *end_of_sequence = false;
         return Status::OK();
       }
 
      protected:
+      std::shared_ptr<model::Node> CreateNode(
+          IteratorContext* ctx, model::Node::Args args) const override {
+        return model::MakeKnownRatioNode(std::move(args),
+                                         dataset()->batch_size_);
+      }
+
       Status SaveInternal(IteratorStateWriter* writer) override {
         mutex_lock l(mu_);
         if (input_impl_)
-          TF_RETURN_IF_ERROR(SaveParent(writer, input_impl_));
+          TF_RETURN_IF_ERROR(SaveInput(writer, input_impl_));
         else
           TF_RETURN_IF_ERROR(writer->WriteScalar(full_name("exhausted"), ""));
         return Status::OK();
       }
 
-      Status RestoreInternal(OpKernelContext* ctx,
+      Status RestoreInternal(IteratorContext* ctx,
                              IteratorStateReader* reader) override {
         mutex_lock l(mu_);
         if (reader->Contains(full_name("exhausted"))) {
           input_impl_.reset();
         } else {
-          input_impl_ = dataset()->input_->MakeIterator(prefix());
-          TF_RETURN_IF_ERROR(RestoreParent(ctx, reader, input_impl_));
+          TF_RETURN_IF_ERROR(
+              dataset()->input_->MakeIterator(ctx, prefix(), &input_impl_));
+          TF_RETURN_IF_ERROR(RestoreInput(ctx, reader, input_impl_));
         }
         return Status::OK();
       }
@@ -425,16 +380,22 @@ class PaddedBatchDatasetOp : public UnaryDatasetOpKernel {
     };
 
     const int64 batch_size_;
+    const bool drop_remainder_;
     const std::vector<PartialTensorShape> padded_shapes_;
     const std::vector<Tensor> padding_values_;
     const DatasetBase* const input_;
     std::vector<PartialTensorShape> output_shapes_;
   };
+
+  const int op_version_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("PaddedBatchDataset").Device(DEVICE_CPU),
                         PaddedBatchDatasetOp);
 
-}  // namespace
+REGISTER_KERNEL_BUILDER(Name("PaddedBatchDatasetV2").Device(DEVICE_CPU),
+                        PaddedBatchDatasetOp);
 
+}  // namespace
+}  // namespace data
 }  // namespace tensorflow

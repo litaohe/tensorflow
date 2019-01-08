@@ -13,8 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/window_dataset.h"
+#include "tensorflow/core/lib/core/errors.h"
 
 namespace tensorflow {
+namespace data {
 namespace {
 
 class WindowDataset : public DatasetBase {
@@ -22,11 +24,12 @@ class WindowDataset : public DatasetBase {
   WindowDataset(std::vector<std::vector<Tensor>> elements,
                 DataTypeVector output_types,
                 std::vector<PartialTensorShape> output_shapes)
-      : elements_(std::move(elements)),
+      : DatasetBase(DatasetContext({"Window"})),
+        elements_(std::move(elements)),
         output_types_(std::move(output_types)),
         output_shapes_(std::move(output_shapes)) {}
 
-  std::unique_ptr<IteratorBase> MakeIterator(
+  std::unique_ptr<IteratorBase> MakeIteratorInternal(
       const string& prefix) const override {
     return std::unique_ptr<IteratorBase>(
         new Iterator({this, strings::StrCat(prefix, "::Window")}));
@@ -38,7 +41,26 @@ class WindowDataset : public DatasetBase {
     return output_shapes_;
   }
 
-  string DebugString() override { return "WindowDataset"; }
+  int64 AllocatedBytes() const override {
+    int64 allocated_bytes = 0;
+    for (auto& element : elements_) {
+      allocated_bytes += GetAllocatedBytes(element);
+    }
+    return allocated_bytes;
+  }
+
+  int64 Cardinality() const override { return elements_.size(); }
+
+  string DebugString() const override { return "WindowDataset"; }
+
+ protected:
+  // TODO(b/110981596): Support checkpointing.
+  Status AsGraphDefInternal(SerializationContext* ctx,
+                            DatasetGraphDefBuilder* b,
+                            Node** output) const override {
+    return errors::Unimplemented("%s does not support serialization",
+                                 DebugString());
+  }
 
  private:
   class Iterator : public DatasetIterator<WindowDataset> {
@@ -56,6 +78,21 @@ class WindowDataset : public DatasetBase {
         *end_of_sequence = false;
         *out_tensors = dataset()->elements_[i_++];
       }
+      return Status::OK();
+    }
+
+    Status SaveInternal(IteratorStateWriter* writer) override {
+      mutex_lock l(mu_);
+      TF_RETURN_IF_ERROR(writer->WriteScalar(full_name("i"), i_));
+      return Status::OK();
+    }
+
+    Status RestoreInternal(IteratorContext* ctx,
+                           IteratorStateReader* reader) override {
+      mutex_lock l(mu_);
+      int64 i;
+      TF_RETURN_IF_ERROR(reader->ReadScalar(full_name("i"), &i));
+      i_ = size_t(i);
       return Status::OK();
     }
 
@@ -81,4 +118,5 @@ Status NewWindowDataset(std::vector<std::vector<Tensor>> elements,
   return Status::OK();
 }
 
+}  // namespace data
 }  // namespace tensorflow

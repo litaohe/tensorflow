@@ -21,6 +21,7 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/common_runtime/dma_helper.h"
 #include "tensorflow/core/common_runtime/process_util.h"
+#include "tensorflow/core/distributed_runtime/request_id.h"
 #include "tensorflow/core/distributed_runtime/tensor_coding.h"
 #include "tensorflow/core/distributed_runtime/worker_cache.h"
 #include "tensorflow/core/distributed_runtime/worker_interface.h"
@@ -67,6 +68,7 @@ class RpcRecvTensorCall : public BaseRecvTensorCall {
     done_ = std::move(done);
     req_.set_step_id(step_id);
     req_.set_rendezvous_key(key.data(), key.size());
+    req_.set_request_id(GetUniqueRequestId());
   }
 
   void Reset(WorkerCacheInterface* wc) {
@@ -225,7 +227,7 @@ void RpcRemoteRendezvous::RecvFromRemoteAsync(
 
   Device* dst_device;
   if (s.ok()) {
-    s = sess->device_mgr->LookupDevice(parsed.dst_device, &dst_device);
+    s = sess->device_mgr()->LookupDevice(parsed.dst_device, &dst_device);
   }
   if (!s.ok()) {
     if (rwi != nullptr) {
@@ -241,6 +243,15 @@ void RpcRemoteRendezvous::RecvFromRemoteAsync(
 
   // Record "call" in active_ so that it can be aborted cleanly.
   RegisterCall(call);
+
+  // RendezvousMgr already aborted, shouldn't send RPC call any more
+  if (!call->status().ok()) {
+    call->done()(call->status(), Args(), Args(), Tensor(), false);
+    session()->worker_cache->ReleaseWorker(call->src_worker_, call->wi_);
+    call->wi_ = nullptr;
+    get_call_freelist()->Release(call, session()->worker_cache.get());
+    return;
+  }
 
   // Start "call".
   Ref();

@@ -17,7 +17,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import signal
+import sys
 import traceback
+
+import six
 
 # Google-internal import(s).
 from tensorflow.python.debug.lib import common
@@ -137,6 +141,24 @@ class GrpcDebugWrapperSession(framework.NonInteractiveDebugWrapperSession):
             if not address.startswith(common.GRPC_URL_PREFIX) else address)
 
 
+def _signal_handler(unused_signal, unused_frame):
+  while True:
+    response = six.moves.input(
+        "\nSIGINT received. Quit program? (Y/n): ").strip()
+    if response in ("", "Y", "y"):
+      sys.exit(0)
+    elif response in ("N", "n"):
+      break
+
+
+def register_signal_handler():
+  try:
+    signal.signal(signal.SIGINT, _signal_handler)
+  except ValueError:
+    # This can happen if we are not in the MainThread.
+    pass
+
+
 class TensorBoardDebugWrapperSession(GrpcDebugWrapperSession):
   """A tfdbg Session wrapper that can be used with TensorBoard Debugger Plugin.
 
@@ -153,7 +175,21 @@ class TensorBoardDebugWrapperSession(GrpcDebugWrapperSession):
                sess,
                grpc_debug_server_addresses,
                thread_name_filter=None,
+               send_traceback_and_source_code=True,
                log_usage=True):
+    """Constructor of TensorBoardDebugWrapperSession.
+
+    Args:
+      sess: The `tf.Session` instance to be wrapped.
+      grpc_debug_server_addresses: gRPC address(es) of debug server(s), as a
+        `str` or a `list` of `str`s. E.g., "localhost:2333",
+        "grpc://localhost:2333", ["192.168.0.7:2333", "192.168.0.8:2333"].
+      thread_name_filter: Optional filter for thread names.
+      send_traceback_and_source_code: Whether traceback of graph elements and
+        the source code are to be sent to the debug server(s).
+      log_usage: Whether the usage of this class is to be logged (if
+        applicable).
+    """
     def _gated_grpc_watch_fn(fetches, feeds):
       del fetches, feeds  # Unused.
       return framework.WatchOptions(
@@ -166,9 +202,12 @@ class TensorBoardDebugWrapperSession(GrpcDebugWrapperSession):
         thread_name_filter=thread_name_filter,
         log_usage=log_usage)
 
+    self._send_traceback_and_source_code = send_traceback_and_source_code
     # Keeps track of the latest version of Python graph object that has been
     # sent to the debug servers.
     self._sent_graph_version = -1
+
+    register_signal_handler()
 
   def run(self,
           fetches,
@@ -176,14 +215,17 @@ class TensorBoardDebugWrapperSession(GrpcDebugWrapperSession):
           options=None,
           run_metadata=None,
           callable_runner=None,
-          callable_runner_args=None):
-    self._sent_graph_version = publish_traceback(
-        self._grpc_debug_server_urls, self.graph, feed_dict, fetches,
-        self._sent_graph_version)
+          callable_runner_args=None,
+          callable_options=None):
+    if self._send_traceback_and_source_code:
+      self._sent_graph_version = publish_traceback(
+          self._grpc_debug_server_urls, self.graph, feed_dict, fetches,
+          self._sent_graph_version)
     return super(TensorBoardDebugWrapperSession, self).run(
         fetches,
         feed_dict=feed_dict,
         options=options,
         run_metadata=run_metadata,
         callable_runner=callable_runner,
-        callable_runner_args=callable_runner_args)
+        callable_runner_args=callable_runner_args,
+        callable_options=callable_options)

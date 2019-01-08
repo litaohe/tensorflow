@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #ifndef __ANDROID__
+#include "tensorflow/core/distributed_runtime/server_lib.h"
 #include "tensorflow/core/framework/op_gen_lib.h"
 #endif
 #include "tensorflow/core/common_runtime/shape_refiner.h"
@@ -84,19 +85,20 @@ struct TF_Graph {
   std::unordered_map<tensorflow::string, tensorflow::Node*> name_map
       GUARDED_BY(mu);
 
-  // The keys of this map are all the active sessions using this graph.
-  // Each value is the current "runnability" status of the corresponding
-  // session. Under normal conditions all statuses are Status::OK(), but
-  // if some operation is mutated after it was run by a session (this
-  // is detected in RecordMutation function), that session is no longer
-  // safe to run. Its status will contain the error that will be returned
-  // to the user, should she try running this session.
+  // The keys of this map are all the active sessions using this graph. Each
+  // value records whether the graph has been mutated since the corresponding
+  // session has been run (this is detected in RecordMutation function). If the
+  // string is empty, no mutation has occurred. Otherwise the string is a
+  // description of the mutation suitable for returning to the user.
   //
   // Sessions are added to this map in TF_NewSession, and removed in
   // TF_DeleteSession.
   // TF_Graph may only / must be deleted when
   //   sessions.size() == 0 && delete_requested == true
-  tensorflow::gtl::FlatMap<TF_Session*, tensorflow::Status> sessions
+  //
+  // TODO(b/74949947): mutations currently trigger a warning instead of a bad
+  // status, this should be reverted when possible.
+  tensorflow::gtl::FlatMap<TF_Session*, tensorflow::string> sessions
       GUARDED_BY(mu);
   bool delete_requested GUARDED_BY(mu);  // set true by TF_DeleteGraph
 
@@ -124,15 +126,16 @@ struct TF_Session {
   TF_Session(tensorflow::Session* s, TF_Graph* g);
 
   tensorflow::Session* session;
-  TF_Graph* graph;
+  TF_Graph* const graph;
 
-  tensorflow::mutex mu;
+  tensorflow::mutex mu ACQUIRED_AFTER(TF_Graph::mu);
   int last_num_graph_nodes;
 
-  // NOTE(ashankar): Experimental fields to help keep the
-  // buffers of a TF_Tensor pinned in device memory.
-  const tensorflow::DeviceMgr* device_mgr;   // Owned by session.
-  std::vector<tensorflow::Device*> devices;  // Owned by device_mgr.
+  // If true, TF_SessionRun and similar methods will call
+  // ExtendSessionGraphHelper before running the graph (this is the default
+  // public behavior). Can be set to false if the caller needs to call
+  // ExtendSessionGraphHelper manually.
+  std::atomic<bool> extend_before_run;
 };
 
 struct TF_ImportGraphDefOptions {
@@ -177,6 +180,15 @@ struct TF_ApiDefMap {
   tensorflow::mutex lock;
 };
 
+#ifndef __ANDROID__
+struct TF_Server {
+  TF_Server(std::unique_ptr<tensorflow::ServerInterface> server);
+
+  const tensorflow::string target;
+  std::unique_ptr<tensorflow::ServerInterface> server;
+};
+#endif
+
 namespace tensorflow {
 
 class TensorCApi {
@@ -210,7 +222,11 @@ void TF_GraphSetOutputHandleShapesAndTypes(TF_Graph* graph, TF_Output output,
                                            TF_Status* status);
 
 void RecordMutation(TF_Graph* graph, const TF_Operation& op,
-                    const char* mutation_type);
+                    const char* mutation_type)
+    EXCLUSIVE_LOCKS_REQUIRED(graph->mu);
+
+bool ExtendSessionGraphHelper(TF_Session* session, TF_Status* status)
+    LOCKS_EXCLUDED(session->graph->mu, session->mu);
 
 }  // end namespace tensorflow
 

@@ -25,6 +25,8 @@ from __future__ import print_function
 
 import abc
 
+import six
+
 from tensorflow.contrib.slim.python.slim.data import data_decoder
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import sparse_tensor
@@ -37,6 +39,7 @@ from tensorflow.python.ops import parsing_ops
 from tensorflow.python.ops import sparse_ops
 
 
+@six.add_metaclass(abc.ABCMeta)
 class ItemHandler(object):
   """Specifies the item-to-Features mapping for tf.parse_example.
 
@@ -44,8 +47,6 @@ class ItemHandler(object):
   proto as well as a function that post-processes the results of Example
   parsing.
   """
-
-  __metaclass__ = abc.ABCMeta
 
   def __init__(self, keys):
     """Constructs the handler with the name of the tf.Feature keys to use.
@@ -102,7 +103,7 @@ class BoundingBox(ItemHandler):
   """An ItemHandler that concatenates a set of parsed Tensors to Bounding Boxes.
   """
 
-  def __init__(self, keys=None, prefix=None):
+  def __init__(self, keys=None, prefix=''):
     """Initialize the bounding box handler.
 
     Args:
@@ -124,7 +125,7 @@ class BoundingBox(ItemHandler):
     super(BoundingBox, self).__init__(self._full_keys)
 
   def tensors_to_item(self, keys_to_tensors):
-    """Maps the given dictionary of tensors to a contatenated list of bboxes.
+    """Maps the given dictionary of tensors to a concatenated list of bboxes.
 
     Args:
       keys_to_tensors: a mapping of TF-Example keys to parsed tensors.
@@ -349,7 +350,8 @@ class Image(ItemHandler):
                shape=None,
                channels=3,
                dtype=dtypes.uint8,
-               repeated=False):
+               repeated=False,
+               dct_method=''):
     """Initializes the image.
 
     Args:
@@ -368,6 +370,11 @@ class Image(ItemHandler):
               tf.decode_raw,
       repeated: if False, decodes a single image. If True, decodes a
         variable number of image strings from a 1D tensor of strings.
+      dct_method: An optional string. Defaults to empty string. It only takes
+        effect when image format is jpeg, used to specify a hint about the
+        algorithm used for jpeg decompression. Currently valid values
+        are ['INTEGER_FAST', 'INTEGER_ACCURATE']. The hint may be ignored, for
+        example, the jpeg library does not have that specific option.
     """
     if not image_key:
       image_key = 'image/encoded'
@@ -381,6 +388,7 @@ class Image(ItemHandler):
     self._channels = channels
     self._dtype = dtype
     self._repeated = repeated
+    self._dct_method = dct_method
 
   def tensors_to_item(self, keys_to_tensors):
     """See base class."""
@@ -406,9 +414,30 @@ class Image(ItemHandler):
       A tensor that represents decoded image of self._shape, or
       (?, ?, self._channels) if self._shape is not specified.
     """
+
     def decode_image():
-      """Decodes a png or jpg based on the headers."""
-      return image_ops.decode_image(image_buffer, self._channels)
+      """Decodes a image based on the headers."""
+      return math_ops.cast(
+          image_ops.decode_image(image_buffer, channels=self._channels),
+          self._dtype)
+
+    def decode_jpeg():
+      """Decodes a jpeg image with specified '_dct_method'."""
+      return math_ops.cast(
+          image_ops.decode_jpeg(
+              image_buffer,
+              channels=self._channels,
+              dct_method=self._dct_method), self._dtype)
+
+    def check_jpeg():
+      """Checks if an image is jpeg."""
+      # For jpeg, we directly use image_ops.decode_jpeg rather than decode_image
+      # in order to feed the jpeg specify parameter 'dct_method'.
+      return control_flow_ops.cond(
+          image_ops.is_jpeg(image_buffer),
+          decode_jpeg,
+          decode_image,
+          name='cond_jpeg')
 
     def decode_raw():
       """Decodes a raw image."""
@@ -420,7 +449,7 @@ class Image(ItemHandler):
             math_ops.equal(image_format, 'RAW')): decode_raw,
     }
     image = control_flow_ops.case(
-        pred_fn_pairs, default=decode_image, exclusive=True)
+        pred_fn_pairs, default=check_jpeg, exclusive=True)
 
     image.set_shape([None, None, self._channels])
     if self._shape is not None:
